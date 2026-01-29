@@ -3,6 +3,9 @@ import { chromium } from "playwright";
 import pTimeout from "p-timeout";
 import dns from "dns/promises";
 import { URL } from "url";
+import fs from "fs/promises";
+import path from "path";
+import os from "os";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error("Missing BOT_TOKEN env var");
@@ -19,6 +22,8 @@ const MAX_URL_LEN = 2048;
 
 const MAX_LINKS = 8;
 const SCROLL_PX = 650;
+const MAX_MEDIA_ITEMS = 6;
+const MAX_MEDIA_BYTES = 45 * 1024 * 1024;
 
 // Grid tap settings
 const GRID_COLS = 6; // A..F
@@ -87,6 +92,7 @@ async function getBrowser() {
  *   pages: Page[],
  *   active: number,
  *   links: {text, href}[],
+ *   media: {label, url, type}[],
  *   lastMsgId: number|null,
  *   zoom: number,              // 1.0 = 100%
  *   mobile: boolean,           // mobile emulation on/off
@@ -128,6 +134,7 @@ async function getSession(chatId) {
     pages: [page],
     active: 0,
     links: [],
+    media: [],
     lastMsgId: null,
     zoom: 1.0,
     mobile,
@@ -206,6 +213,67 @@ async function collectLinks(page) {
   }, { maxLinks: MAX_LINKS });
 }
 
+async function collectMedia(page) {
+  return await page.evaluate(({ maxItems }) => {
+    const cleanText = (text) => (text || "").trim().replace(/\s+/g, " ").slice(0, 60);
+
+    const items = [];
+    const seen = new Set();
+
+    const pushItem = (url, type, label) => {
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      items.push({ url, type, label: cleanText(label) || type.toUpperCase() });
+    };
+
+    const videos = Array.from(document.querySelectorAll("video"));
+    for (const video of videos) {
+      const src = video.currentSrc || video.src;
+      if (src) pushItem(src, "video", video.getAttribute("title") || video.getAttribute("aria-label") || "Video");
+      const sources = Array.from(video.querySelectorAll("source"));
+      for (const source of sources) {
+        if (items.length >= maxItems) break;
+        pushItem(source.src, "video", source.getAttribute("title") || source.getAttribute("label") || "Video source");
+      }
+      if (items.length >= maxItems) break;
+    }
+
+    const audios = Array.from(document.querySelectorAll("audio"));
+    for (const audio of audios) {
+      if (items.length >= maxItems) break;
+      const src = audio.currentSrc || audio.src;
+      if (src) pushItem(src, "audio", audio.getAttribute("title") || audio.getAttribute("aria-label") || "Audio");
+      const sources = Array.from(audio.querySelectorAll("source"));
+      for (const source of sources) {
+        if (items.length >= maxItems) break;
+        pushItem(source.src, "audio", source.getAttribute("title") || source.getAttribute("label") || "Audio source");
+      }
+    }
+
+    return items.slice(0, maxItems);
+  }, { maxItems: MAX_MEDIA_ITEMS });
+}
+
+async function downloadMedia(url, type) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Failed to download media: ${response.status}`);
+
+  const contentLength = response.headers.get("content-length");
+  if (contentLength && Number(contentLength) > MAX_MEDIA_BYTES) {
+    throw new Error("Media too large to send. Try opening it directly.");
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  if (arrayBuffer.byteLength > MAX_MEDIA_BYTES) {
+    throw new Error("Media too large to send. Try opening it directly.");
+  }
+
+  const ext = type === "audio" ? ".mp3" : ".mp4";
+  const filePath = path.join(os.tmpdir(), `tg-browser-${Date.now()}${ext}`);
+  await fs.writeFile(filePath, Buffer.from(arrayBuffer));
+  return filePath;
+}
+
 function buildKeyboard(sess) {
   const tabInfo = `Tab ${sess.active + 1}/${sess.pages.length}`;
   const modeInfo = sess.mobile ? "📱" : "🖥️";
@@ -282,6 +350,7 @@ async function render(ctx, chatId, captionExtra = "") {
   const shot = await page.screenshot({ fullPage: false });
 
   sess.links = await collectLinks(page);
+  sess.media = await collectMedia(page);
 
   const caption =
     `🌐 ${title || "Page"}\n` +
@@ -289,6 +358,7 @@ async function render(ctx, chatId, captionExtra = "") {
     `🧩 Tab: ${sess.active + 1}/${sess.pages.length}  |  ${sess.mobile ? "📱 Mobile" : "🖥️ Desktop"}  |  🔍 ${Math.round(sess.zoom * 100)}%\n` +
     `🖱️ Tap: /tap x y  |  Grid: /grid\n` +
     (sess.links.length ? `\nLinks: tap buttons or /click 1..${sess.links.length}` : "\nNo visible links detected.") +
+    (sess.media.length ? `\nMedia: /media or /video 1..${sess.media.length}` : "") +
     (captionExtra ? `\n\n${captionExtra}` : "");
 
   if (sess.lastMsgId) {
@@ -336,6 +406,24 @@ Tabs:
 • /tab <n>
 • /tab close
 • /close`
+  );
+});
+
+bot.command("media", async (ctx) => {
+  const chatId = ctx.chat.id;
+  const sess = await getSession(chatId);
+
+  if (!sess.media.length) {
+    return ctx.reply("No media detected on this page.");
+  }
+
+  const lines = sess.media.map((item, i) => {
+    const safeUrl = item.url.length > 100 ? `${item.url.slice(0, 97)}...` : item.url;
+    return `${i + 1}) ${item.label} (${item.type})\n${safeUrl}`;
+  });
+
+  await ctx.reply(
+    `🎬 Media found:\n\n${lines.join("\n\n")}\n\nUse /video <n> to play or /download <n> to download.`
   );
 });
 
@@ -537,6 +625,54 @@ bot.command("enter", async (ctx) => {
     await render(ctx, chatId, "⏎ submitted");
   } catch (e) {
     await ctx.reply(`❌ ${e.message || "Enter failed."}`);
+  }
+});
+
+bot.command("video", async (ctx) => {
+  const chatId = ctx.chat.id;
+  const n = Number(argText(ctx.message.text));
+  if (!Number.isFinite(n) || n < 1) return ctx.reply("Usage: /video <number>");
+
+  const sess = await getSession(chatId);
+  const item = sess.media[n - 1];
+  if (!item) return ctx.reply(`No media #${n}. Use /media to list.`);
+
+  if (!item.url.startsWith("http")) {
+    return ctx.reply("❌ This media source can't be downloaded (non-http URL). Try opening it in the page.");
+  }
+
+  try {
+    const filePath = await downloadMedia(item.url, item.type);
+    if (item.type === "audio") {
+      await ctx.replyWithAudio({ source: filePath }, { caption: item.label });
+    } else {
+      await ctx.replyWithVideo({ source: filePath }, { caption: item.label });
+    }
+    await fs.unlink(filePath).catch(() => {});
+  } catch (e) {
+    await ctx.reply(`❌ ${e.message || "Failed to send media."}`);
+  }
+});
+
+bot.command("download", async (ctx) => {
+  const chatId = ctx.chat.id;
+  const n = Number(argText(ctx.message.text));
+  if (!Number.isFinite(n) || n < 1) return ctx.reply("Usage: /download <number>");
+
+  const sess = await getSession(chatId);
+  const item = sess.media[n - 1];
+  if (!item) return ctx.reply(`No media #${n}. Use /media to list.`);
+
+  if (!item.url.startsWith("http")) {
+    return ctx.reply("❌ This media source can't be downloaded (non-http URL). Try opening it in the page.");
+  }
+
+  try {
+    const filePath = await downloadMedia(item.url, item.type);
+    await ctx.replyWithDocument({ source: filePath }, { caption: item.label });
+    await fs.unlink(filePath).catch(() => {});
+  } catch (e) {
+    await ctx.reply(`❌ ${e.message || "Failed to download media."}`);
   }
 });
 
