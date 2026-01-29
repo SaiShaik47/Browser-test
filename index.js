@@ -75,7 +75,20 @@ function argText(text) {
 }
 
 async function safeRun(fn) {
-  return await pTimeout(fn(), TOTAL_TIMEOUT_MS);
+  return await pTimeout(fn(), { milliseconds: TOTAL_TIMEOUT_MS });
+}
+
+function looksLikeUrl(input) {
+  if (!input) return false;
+  if (/\s/.test(input)) return false;
+  if (/^https?:\/\//i.test(input)) return true;
+  if (input.startsWith("www.")) return true;
+  return input.includes(".") || input.includes(":");
+}
+
+function buildSearchUrl(query) {
+  const params = new URLSearchParams({ q: query });
+  return `https://duckduckgo.com/?${params.toString()}`;
 }
 
 // ----------------- Browser + Sessions (Multi-tabs) -----------------
@@ -300,6 +313,18 @@ function buildKeyboard(sess) {
     Markup.button.callback(`${modeInfo} ${zoomInfo}`, "noop")
   ];
 
+  const row4 = [
+    Markup.button.callback("⤒ Top", "nav:top"),
+    Markup.button.callback("⤓ Bottom", "nav:bottom"),
+    Markup.button.callback("📸 Full", "shot:full"),
+    Markup.button.callback("🔗 URL", "info:url")
+  ];
+
+  const row5 = [
+    Markup.button.callback("📑 Tabs", "tab:list"),
+    Markup.button.callback("🧹 Close Tab", "tab:close")
+  ];
+
   const linkButtons = sess.links.map((l, i) =>
     Markup.button.callback(`${i + 1}) ${l.text}`, `link:${i}`)
   );
@@ -307,7 +332,7 @@ function buildKeyboard(sess) {
   const linkRows = [];
   for (let i = 0; i < linkButtons.length; i += 2) linkRows.push(linkButtons.slice(i, i + 2));
 
-  const rows = [row1, row2, row3, ...linkRows];
+  const rows = [row1, row2, row3, row4, row5, ...linkRows];
   return Markup.inlineKeyboard(rows);
 }
 
@@ -380,14 +405,39 @@ async function render(ctx, chatId, captionExtra = "") {
   sess.lastMsgId = msg.message_id;
 }
 
+async function sendFullPageShot(ctx, chatId) {
+  const sess = await getSession(chatId);
+  const page = getActivePage(sess);
+  const title = await page.title().catch(() => "");
+  const url = page.url() || "";
+  const shot = await page.screenshot({ fullPage: true });
+  const caption =
+    `🖼️ Full Page\n` +
+    `🌐 ${title || "Page"}\n` +
+    `🔗 ${url || "(no url)"}`;
+
+  await ctx.replyWithPhoto({ source: shot }, { caption });
+}
+
+async function formatTabs(sess) {
+  const lines = await Promise.all(sess.pages.map(async (p, i) => {
+    const t = await p.title().catch(() => "");
+    const u = p.url?.() || "";
+    const active = i === sess.active ? "✅" : "  ";
+    return `${active} ${i + 1}) ${t || "Untitled"}\n   ${u}`;
+  }));
+  return lines.join("\n\n") || "No tabs.";
+}
+
 // ----------------- Commands -----------------
 bot.start(async (ctx) => {
   await ctx.reply(
 `🧭 Remote Browser (Grid + Zoom + Mobile)
 
 Open / Navigate:
-• /go <url>
+• /go <url or search>
 • /click <n>
+• /url
 
 Tap:
 • /tap <x> <y>
@@ -430,21 +480,33 @@ bot.command("media", async (ctx) => {
 bot.command("go", async (ctx) => {
   const chatId = ctx.chat.id;
   const raw = argText(ctx.message.text);
+  if (!raw) return ctx.reply("Usage: /go <url or search>");
+
   try {
-    const url = await validateUrl(raw);
+    const isUrl = looksLikeUrl(raw);
+    const targetUrl = isUrl ? await validateUrl(raw) : buildSearchUrl(raw);
     const sess = await getSession(chatId);
     const page = getActivePage(sess);
 
     await safeRun(async () => {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
       await page.waitForTimeout(600);
       await applyZoomToPage(page, sess.zoom);
     });
 
-    await render(ctx, chatId);
+    await render(ctx, chatId, isUrl ? "" : `🔎 search: ${raw}`);
   } catch (e) {
     await ctx.reply(`❌ ${e.message || "Failed to open."}`);
   }
+});
+
+bot.command("url", async (ctx) => {
+  const chatId = ctx.chat.id;
+  const sess = await getSession(chatId);
+  const page = getActivePage(sess);
+  const url = page.url() || "";
+  if (!url) return ctx.reply("No URL available.");
+  await ctx.reply(`🔗 ${url}`);
 });
 
 bot.command("click", async (ctx) => {
@@ -680,15 +742,7 @@ bot.command("download", async (ctx) => {
 bot.command("tabs", async (ctx) => {
   const chatId = ctx.chat.id;
   const sess = await getSession(chatId);
-
-  const lines = await Promise.all(sess.pages.map(async (p, i) => {
-    const t = await p.title().catch(() => "");
-    const u = p.url?.() || "";
-    const active = i === sess.active ? "✅" : "  ";
-    return `${active} ${i + 1}) ${t || "Untitled"}\n   ${u}`;
-  }));
-
-  await ctx.reply(lines.join("\n\n") || "No tabs.");
+  await ctx.reply(await formatTabs(sess));
 });
 
 bot.command("tab", async (ctx) => {
@@ -760,6 +814,26 @@ bot.on("callback_query", async (ctx) => {
       return;
     }
 
+    if (data === "tab:list") {
+      await ctx.reply(await formatTabs(sess));
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    if (data === "tab:close") {
+      if (sess.pages.length === 1) {
+        await ctx.answerCbQuery("Can't close the last tab");
+        return;
+      }
+      const closing = sess.pages[sess.active];
+      try { await closing.close(); } catch {}
+      sess.pages.splice(sess.active, 1);
+      sess.active = Math.max(0, sess.active - 1);
+      await render(ctx, chatId, "🧹 closed tab");
+      await ctx.answerCbQuery();
+      return;
+    }
+
     if (data === "grid:show") {
       await ctx.answerCbQuery("Grid opened");
       await ctx.reply("🧊 Grid Tap: choose a cell", gridKeyboard());
@@ -805,6 +879,19 @@ bot.on("callback_query", async (ctx) => {
       return;
     }
 
+    if (data === "info:url") {
+      const url = page.url() || "";
+      await ctx.reply(url ? `🔗 ${url}` : "No URL available.");
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    if (data === "shot:full") {
+      await sendFullPageShot(ctx, chatId);
+      await ctx.answerCbQuery();
+      return;
+    }
+
     if (data.startsWith("nav:")) {
       const action = data.split(":")[1];
 
@@ -815,6 +902,12 @@ bot.on("callback_query", async (ctx) => {
         } else if (action === "down") {
           await page.mouse.wheel(0, SCROLL_PX);
           await page.waitForTimeout(120);
+        } else if (action === "top") {
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await page.waitForTimeout(150);
+        } else if (action === "bottom") {
+          await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+          await page.waitForTimeout(150);
         } else if (action === "reload") {
           await page.reload({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
           await page.waitForTimeout(350);
