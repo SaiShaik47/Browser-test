@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OmniBest — Your Everything Website</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="hero">
+    <nav class="nav container">
+      <div class="logo">OmniBest</div>
+      <button id="themeToggle" class="theme-btn" aria-label="Toggle theme">🌙</button>
+    </nav>
+
+    <div class="container hero-content">
+      <p class="badge">All-in-one excellence</p>
+      <h1>The website that helps you with <span>everything</span>.</h1>
+      <p class="subtitle">Plan your day, find top picks, track goals, and get focused guidance — all in one smooth experience.</p>
+      <div class="hero-actions">
+        <a href="#tools" class="btn primary">Explore Tools</a>
+        <a href="#planner" class="btn ghost">Try Quick Planner</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="tools" class="section container">
+      <h2>Best-in-class tools</h2>
+      <div class="grid cards">
+        <article class="card">
+          <h3>Smart Recommendations</h3>
+          <p>Get practical, high-quality suggestions for work, study, health, and lifestyle.</p>
+        </article>
+        <article class="card">
+          <h3>Fast Decision Helper</h3>
+          <p>Compare options side-by-side and choose with confidence in minutes.</p>
+        </article>
+        <article class="card">
+          <h3>Focus Mode</h3>
+          <p>Use simple routines and timers to stay productive without feeling overwhelmed.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="planner" class="section section-alt">
+      <div class="container planner-wrap">
+        <div>
+          <h2>Quick Daily Planner</h2>
+          <p>Type your top priorities and let the page generate a lightweight plan.</p>
+          <form id="planForm" class="planner-form">
+            <label>
+              Your goals today
+              <textarea id="goals" rows="4" placeholder="Example: finish report, 30 min workout, clean inbox"></textarea>
+            </label>
+            <button class="btn primary" type="submit">Generate Best Plan</button>
+          </form>
+        </div>
+        <aside id="planOutput" class="plan-output" aria-live="polite">
+          <h3>Your plan will appear here</h3>
+          <p>Add your goals and click generate.</p>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <p>Built to give your best next step, every time.</p>
+      <p>© <span id="year"></span> OmniBest</p>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
